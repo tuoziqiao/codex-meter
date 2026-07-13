@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "package:windows": "tauri build --bundles msi,nsis",
+    "package:exe": "tauri build --no-bundle"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
