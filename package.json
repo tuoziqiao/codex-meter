@@ -8,8 +8,8 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "tauri": "tauri",
-    "package:windows": "tauri build --bundles msi,nsis",
-    "package:exe": "tauri build --no-bundle"
+    "package:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 windows",
+    "package:exe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 exe"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

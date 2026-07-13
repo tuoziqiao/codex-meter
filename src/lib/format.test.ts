@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampPercent, formatResetDate, formatResetTime, needsFastRefresh, quotaTier } from "./format";
+import { clampPercent, formatCompactResetTime, formatInlineResetTime, formatResetDate, formatResetTime, needsFastRefresh, quotaTier } from "./format";
 
 describe("quota formatting", () => {
   it("clamps untrusted percentages", () => {
@@ -16,17 +16,25 @@ describe("quota formatting", () => {
     expect(quotaTier(null)).toBe("unknown");
   });
 
-  it("formats reset time in Chinese by default and supports English", () => {
+  it("formats reset times in Chinese", () => {
     const now = new Date("2026-07-07T00:00:00Z");
     expect(formatResetTime("2026-07-07T01:30:00Z", now)).toBe("1 小时 30 分钟后重置");
-    expect(formatResetTime("2026-07-07T01:30:00Z", now, "zh-CN")).toBe("1 小时 30 分钟后重置");
-    expect(formatResetTime("2026-07-07T01:30:00Z", now, "en")).toBe("resets in 1h 30m");
     expect(formatResetTime("2026-07-06T01:00:00Z", now)).toBe("正在更新额度");
-    expect(formatResetTime("2026-07-06T01:00:00Z", now, "zh-CN")).toBe("正在更新额度");
-    expect(formatResetTime("2026-07-06T01:00:00Z", now, "en")).toBe("Updating quota");
     expect(formatResetTime("invalid", now)).toBe("重置时间未知");
-    expect(formatResetTime("invalid", now, "zh-CN")).toBe("重置时间未知");
-    expect(formatResetTime("invalid", now, "en")).toBe("Reset time unknown");
+  });
+
+  it("formats the compact weekly reset line", () => {
+    const now = new Date("2026-07-07T00:00:00Z");
+    expect(formatCompactResetTime("2026-07-13T19:00:00Z", now)).toBe("6天19小时后重置");
+    expect(formatCompactResetTime("2026-07-07T01:30:00Z", now)).toBe("1小时30分钟后重置");
+  });
+
+  it("formats inline reset countdown for metric rows", () => {
+    const now = new Date("2026-07-07T00:00:00Z");
+    expect(formatInlineResetTime("2026-07-13T19:00:00Z", now)).toBe("6天19小时");
+    expect(formatInlineResetTime("2026-07-07T01:30:00Z", now)).toBe("1小时30分钟");
+    expect(formatInlineResetTime("2026-07-07T00:20:00Z", now)).toBe("20分钟");
+    expect(formatInlineResetTime(null, now)).toBe("--");
   });
 
   it("accelerates only near a future reset", () => {
@@ -37,11 +45,8 @@ describe("quota formatting", () => {
     expect(needsFastRefresh({ ...snapshot, shortWindow: { remainingPercent: 1, resetsAt: "2026-07-06T23:58:00Z", windowSeconds: 18000 } }, now)).toBe(true);
   });
 
-  it("formats the weekly reset as a compact date", () => {
+  it("formats weekly reset dates in Chinese", () => {
     expect(formatResetDate("2026-07-10T00:00:00+08:00")).toBe("7/10");
-    expect(formatResetDate("2026-07-10T00:00:00+08:00", "en")).toBe("7/10");
     expect(formatResetDate(null)).toBe("日期未知");
-    expect(formatResetDate(null, "zh-CN")).toBe("日期未知");
-    expect(formatResetDate(null, "en")).toBe("Date unknown");
   });
 });

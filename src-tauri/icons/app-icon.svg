@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="CodexMeter icon">
+  <defs>
+    <linearGradient id="h-bg" x1="112" y1="96" x2="912" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7F97D4"/>
+      <stop offset="0.38" stop-color="#A58FC8"/>
+      <stop offset="1" stop-color="#F2A884"/>
+    </linearGradient>
+    <linearGradient id="h-shine" x1="256" y1="192" x2="768" y2="832" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#h-bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="208" fill="url(#h-shine)"/>
+
+  <path
+    d="M 248 640 A 264 264 0 0 1 776 640"
+    stroke="#FFFFFF"
+    stroke-width="30"
+    stroke-linecap="round"
+    opacity="0.28"
+  />
+  <path
+    d="M 248 640 A 264 264 0 0 1 776 640"
+    stroke="#FFFFFF"
+    stroke-width="30"
+    stroke-linecap="round"
+    stroke-dasharray="520 360"
+    stroke-dashoffset="0"
+  />
+
+  <path
+    d="M 512 640 L 618 468"
+    stroke="#FFFFFF"
+    stroke-width="24"
+    stroke-linecap="round"
+  />
+</svg>

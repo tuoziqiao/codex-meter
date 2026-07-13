@@ -1,5 +1,6 @@
 mod codex;
 mod models;
+mod window_top;
 
 use std::{
     fs,
@@ -16,7 +17,7 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_window_state::Builder as WindowStateBuilder;
+use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags};
 
 struct AppState {
     client: reqwest::Client,
@@ -142,45 +143,19 @@ fn set_preferences(
     Ok(())
 }
 
-fn apply_lock(app: &AppHandle, locked: bool) -> Result<(), String> {
-    let window = app
-        .get_webview_window("widget")
-        .ok_or_else(|| "widget window missing".to_string())?;
-    window
-        .set_ignore_cursor_events(locked)
-        .map_err(|_| "failed to toggle click-through".to_string())
-}
-
-#[tauri::command]
-fn set_widget_locked(
-    locked: bool,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<WidgetPreferences, String> {
-    let previous = state
-        .preferences
-        .lock()
-        .map_err(|_| "settings unavailable".to_string())?
-        .clone();
-    let mut next = previous.clone();
-    next.locked = locked;
-    persist_preferences(&state.preferences_path, &next)?;
-    if let Err(error) = apply_lock(&app, locked) {
-        let _ = persist_preferences(&state.preferences_path, &previous);
-        return Err(error);
-    }
-    *state
-        .preferences
-        .lock()
-        .map_err(|_| "settings unavailable".to_string())? = next.clone();
-    Ok(next)
-}
-
 #[tauri::command]
 fn set_widget_always_on_top(
     always_on_top: bool,
     app: AppHandle,
     state: State<'_, AppState>,
+) -> Result<WidgetPreferences, String> {
+    apply_always_on_top(&app, &state, always_on_top)
+}
+
+fn apply_always_on_top(
+    app: &AppHandle,
+    state: &AppState,
+    always_on_top: bool,
 ) -> Result<WidgetPreferences, String> {
     let previous = state
         .preferences
@@ -193,7 +168,7 @@ fn set_widget_always_on_top(
     let window = app
         .get_webview_window("widget")
         .ok_or_else(|| "widget window missing".to_string())?;
-    if let Err(error) = window.set_always_on_top(always_on_top) {
+    if let Err(error) = window_top::apply_window_top(&window, always_on_top) {
         let _ = persist_preferences(&state.preferences_path, &previous);
         return Err(format!("failed to toggle always-on-top: {error}"));
     }
@@ -205,23 +180,45 @@ fn set_widget_always_on_top(
     Ok(next)
 }
 
+fn refresh_topmost_if_enabled(app: &AppHandle) {
+    let enabled = app
+        .try_state::<AppState>()
+        .and_then(|state| state.preferences.lock().ok().map(|prefs| prefs.always_on_top))
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("widget") {
+        let _ = window_top::apply_window_top(&window, true);
+    }
+}
+
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
-    let refresh = MenuItem::with_id(app, "refresh", "Refresh now", true, None::<&str>)?;
-    let unlock = MenuItem::with_id(app, "unlock", "Unlock widget", true, None::<&str>)?;
-    let pin = MenuItem::with_id(app, "pin", "Pin / Unpin Codex", true, None::<&str>)?;
-    let language = MenuItem::with_id(app, "language", "Switch Language / 切换语言", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
+    let refresh = MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?;
+    let always_on_top_enabled = app
+        .try_state::<AppState>()
+        .and_then(|state| state.preferences.lock().ok().map(|prefs| prefs.always_on_top))
+        .unwrap_or(true);
+    let always_on_top = CheckMenuItem::with_id(
+        app,
+        "always_on_top",
+        "窗口置顶",
+        true,
+        always_on_top_enabled,
+        None::<&str>,
+    )?;
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(
         app,
         "autostart",
-        "Start at login",
+        "开机启动",
         true,
         autostart_enabled,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &refresh, &unlock, &pin, &language, &autostart, &quit])?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &always_on_top, &refresh, &autostart, &quit])?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .tooltip("CodexMeter");
@@ -229,6 +226,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
     let autostart_menu = autostart.clone();
+    let always_on_top_menu = always_on_top.clone();
     builder
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "show" => {
@@ -238,47 +236,26 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                     } else {
                         let _ = window.show();
                         let _ = window.set_focus();
+                        refresh_topmost_if_enabled(app);
                     }
                 }
             }
             "refresh" => {
                 let _ = app.emit_to("widget", "refresh-requested", ());
             }
-            "unlock" => {
-                let _ = apply_lock(app, false);
+            "always_on_top" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(mut prefs) = state.preferences.lock() {
-                        prefs.locked = false;
-                        let _ = persist_preferences(&state.preferences_path, &prefs);
-                        let _ = app.emit_to("widget", "preferences-changed", prefs.clone());
-                    }
-                }
-            }
-            "pin" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(mut prefs) = state.preferences.lock() {
-                        prefs.pinned_provider = if prefs.pinned_provider.is_some() {
-                            None
-                        } else {
-                            Some("codex".into())
-                        };
-                        let _ = persist_preferences(&state.preferences_path, &prefs);
-                        let _ = app.emit_to("widget", "preferences-changed", prefs.clone());
-                    }
-                }
-            }
-            "language" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    if let Ok(mut prefs) = state.preferences.lock() {
-                        prefs.language = if prefs.language == "en" {
-                            "zh-CN".into()
-                        } else {
-                            "en".into()
-                        };
-                        let normalized = prefs.clone().normalized();
-                        *prefs = normalized.clone();
-                        let _ = persist_preferences(&state.preferences_path, &normalized);
-                        let _ = app.emit_to("widget", "preferences-changed", normalized);
+                    let enabled = state
+                        .preferences
+                        .lock()
+                        .map(|prefs| prefs.always_on_top)
+                        .unwrap_or(true);
+                    let next = !enabled;
+                    match apply_always_on_top(app, &state, next) {
+                        Ok(_) => {
+                            let _ = always_on_top_menu.set_checked(next);
+                        }
+                        Err(error) => eprintln!("always-on-top update failed: {error}"),
                     }
                 }
             }
@@ -316,7 +293,12 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(WindowStateBuilder::default().build())
+        .plugin(
+            WindowStateBuilder::default()
+                // Keep window position across sessions, but always use the configured 350x40 size.
+                .with_state_flags(StateFlags::POSITION)
+                .build(),
+        )
         .setup(|app| {
             let data_dir = app.path().app_config_dir()?;
             let preferences_path = data_dir.join("preferences.json");
@@ -340,11 +322,12 @@ pub fn run() {
                     let _ = window.set_skip_taskbar(false);
                 }
             }
-            if preferences.locked {
-                let _ = apply_lock(app.handle(), true);
-            }
             if let Some(window) = app.get_webview_window("widget") {
-                let _ = window.set_always_on_top(preferences.always_on_top);
+                let size = tauri::LogicalSize::new(350.0, 40.0);
+                let _ = window.set_size(size);
+                let _ = window.set_min_size(Some(size));
+                let _ = window.set_max_size(Some(size));
+                let _ = window_top::apply_window_top(&window, preferences.always_on_top);
             }
             Ok(())
         })
@@ -353,7 +336,6 @@ pub fn run() {
             refresh_snapshots,
             get_preferences,
             set_preferences,
-            set_widget_locked,
             set_widget_always_on_top
         ])
         .on_tray_icon_event(|app, event| {
@@ -366,6 +348,7 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("widget") {
                     let _ = window.show();
                     let _ = window.set_focus();
+                    refresh_topmost_if_enabled(app);
                 }
             }
         })

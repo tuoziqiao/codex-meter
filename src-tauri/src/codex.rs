@@ -10,6 +10,9 @@ const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_AUTH_BYTES: u64 = 256 * 1024;
+const SHORT_WINDOW_SECONDS: u64 = 18_000;
+const WEEKLY_WINDOW_SECONDS: u64 = 604_800;
+const WINDOW_TOLERANCE_SECONDS: u64 = 60;
 
 struct Auth {
     access_token: String,
@@ -270,6 +273,38 @@ fn find_window<'a>(
     None
 }
 
+fn is_weekly_window(seconds: u64) -> bool {
+    seconds > 0 && seconds.abs_diff(WEEKLY_WINDOW_SECONDS) <= WINDOW_TOLERANCE_SECONDS
+}
+
+fn normalize_windows(
+    short_candidate: Option<UsageWindow>,
+    weekly_candidate: Option<UsageWindow>,
+) -> (Option<UsageWindow>, Option<UsageWindow>) {
+    let mut short_window = short_candidate;
+    let mut weekly_window = weekly_candidate;
+
+    // Codex may temporarily expose weekly quota through the former 5h primary slot.
+    if let Some(window) = short_window.clone() {
+        if is_weekly_window(window.window_seconds) {
+            if weekly_window.is_none() {
+                weekly_window = Some(window);
+            }
+            short_window = None;
+        }
+    }
+
+    if let (Some(short), Some(weekly)) = (&short_window, &weekly_window) {
+        let same_percent = (short.remaining_percent - weekly.remaining_percent).abs() < 0.01;
+        let same_reset = short.resets_at == weekly.resets_at;
+        if same_percent && same_reset {
+            short_window = None;
+        }
+    }
+
+    (short_window, weekly_window)
+}
+
 fn safe_http_failure(status: reqwest::StatusCode) -> (&'static str, &'static str) {
     match status.as_u16() {
         401 | 403 => ("signed_out", "Codex login expired. Please sign in again."),
@@ -354,7 +389,7 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
             "5h",
             "primary",
         ],
-        18_000,
+        SHORT_WINDOW_SECONDS,
     ));
     let weekly_window = parse_window(find_window(
         rate_limit,
@@ -368,10 +403,11 @@ pub async fn fetch_snapshot(client: &reqwest::Client) -> ProviderSnapshot {
             "weekly",
             "secondary",
         ],
-        604_800,
+        WEEKLY_WINDOW_SECONDS,
     ));
-    if short_window.is_none() {
-        return ProviderSnapshot::failure("unavailable", "Quota response is missing the 5h window.");
+    let (short_window, weekly_window) = normalize_windows(short_window, weekly_window);
+    if short_window.is_none() && weekly_window.is_none() {
+        return ProviderSnapshot::failure("unavailable", "Quota response is missing usage windows.");
     }
 
     let usage_credits = usage
@@ -503,6 +539,42 @@ mod tests {
             parse_window(Some(&explicit_used)).unwrap().remaining_percent,
             99.6
         );
+    }
+
+    #[test]
+    fn reclassifies_primary_weekly_window_when_five_hour_limit_is_suspended() {
+        let rate_limit = serde_json::json!({
+            "primaryWindow": {
+                "remainingPercent": 42,
+                "resetsAt": "2026-07-10T00:00:00Z",
+                "windowSeconds": 604800
+            }
+        });
+        let short = parse_window(find_window(
+            &rate_limit,
+            &["primary_window", "primaryWindow", "primary"],
+            SHORT_WINDOW_SECONDS,
+        ));
+        let weekly = parse_window(find_window(
+            &rate_limit,
+            &["secondary_window", "weekly_window", "weekly"],
+            WEEKLY_WINDOW_SECONDS,
+        ));
+        let (short, weekly) = normalize_windows(short, weekly);
+        assert!(short.is_none());
+        assert_eq!(weekly.unwrap().remaining_percent, 42.0);
+    }
+
+    #[test]
+    fn drops_duplicate_short_window_when_it_matches_weekly() {
+        let window = UsageWindow {
+            remaining_percent: 42.0,
+            resets_at: Some("2026-07-10T00:00:00Z".into()),
+            window_seconds: 18_000,
+        };
+        let (short, weekly) = normalize_windows(Some(window.clone()), Some(window));
+        assert!(short.is_none());
+        assert_eq!(weekly.unwrap().remaining_percent, 42.0);
     }
 
     #[test]
