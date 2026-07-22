@@ -1,35 +1,31 @@
 # CodexMeter 项目简介
 
-CodexMeter 是一个 Tauri 2 桌面悬浮窗，只读使用本机 Codex Desktop 登录态查询额度。
+CodexMeter 是一个 Tauri 2 Windows 托盘工具。它只读复用本机 Codex Desktop 会话查询真实额度，并通过本机 CDP 把电量组件注入 Codex 标题栏“帮助”菜单之后。
 
-## 当前界面
+## 数据链路
 
-- 固定窗口尺寸：350 × 40。
-- 紧凑布局显示「本周」额度：剩余百分比、进度条、重置倒计时（如 `6天19小时`）。
-- 官方暂停 5 小时额度时，界面只显示本周；若接口恢复独立 5 小时窗口，会自动再显示一行。
-- 默认且唯一语言为中文；托盘菜单同样使用中文。
-- 重置机会仍由后端读取，但当前界面不显示。
+`Codex 本机会话 → Rust 额度查询 → JSON Lines → Node.js CDP 注入器 → 标题栏电量组件`
 
-## 技术栈
-
-- 前端：React、TypeScript、Vite。
-- 桌面壳：Tauri 2、Rust。
-- 网络：Rust `reqwest` 只读查询 Codex 额度响应。
+- 周额度存在时优先展示周额度。
+- 周额度缺失时回退到短周期额度。
+- 数据不可用时显示 `--`，不使用 Mock 数据。
+- 托盘退出时向注入器发送关闭消息并移除组件。
 
 ## 关键文件
 
-- `src/components/QuotaCard.tsx`：350 × 40 中文紧凑额度条。
-- `src/lib/format.ts`：额度百分比和刷新策略。
-- `src-tauri/src/codex.rs`：本地登录态与额度响应解析。
-- `scripts/package-windows.ps1`：加载 MSVC 环境并构建 Windows 产物。
+- `src-tauri/src/codex.rs`：本地登录状态和额度响应解析。
+- `src-tauri/src/models.rs`：额度到注入消息的映射。
+- `src-tauri/src/lib.rs`：刷新调度和托盘生命周期。
+- `src-tauri/src/cdp.rs`：注入器进程管理。
+- `src-tauri/resources/injector.mjs`：CDP 会话与消息分发。
+- `src-tauri/resources/inject.js`：标题栏 UI。
+- `src/inject.test.ts`：注入 UI 自动化测试。
 
 ## 开发命令
 
 ```powershell
-npm run test
+npm test
 npm run build
-npm run package:exe
-npm run package:windows
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
-
-Windows 打包需要 Rust MSVC 工具链和 Visual Studio Build Tools 的 **Desktop development with C++** 工作负载。

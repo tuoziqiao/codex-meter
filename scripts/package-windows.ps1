@@ -23,7 +23,13 @@ if (-not (Test-Path -LiteralPath $devCmd)) {
 }
 
 $tauriArguments = if ($Target -eq "exe") { "--no-bundle" } else { "--bundles msi,nsis" }
-$command = "call `"$devCmd`" -arch=x64 -host_arch=x64 >nul && npx tauri build $tauriArguments"
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$cargoTargetDir = Join-Path $projectRoot "src-tauri\target"
+if (Test-Path -LiteralPath $cargoTargetDir) {
+  Remove-Item -LiteralPath $cargoTargetDir -Recurse -Force
+}
+
+$command = "call `"$devCmd`" -arch=x64 -host_arch=x64 >nul && cd /d `"$projectRoot`" && set `"CARGO_TARGET_DIR=$cargoTargetDir`" && npx tauri build $tauriArguments"
 cmd.exe /d /s /c $command
 if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE

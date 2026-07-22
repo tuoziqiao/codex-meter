@@ -10,34 +10,17 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "widget",
-        "title": "CodexMeter",
-        "width": 350,
-        "height": 40,
-        "minWidth": 350,
-        "minHeight": 40,
-        "maxWidth": 350,
-        "maxHeight": 40,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "visible": true
-      }
-    ],
+    "windows": [],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:" }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "Codex quota at a glance",
-    "longDescription": "A lightweight floating desktop card for Codex usage limits.",
+    "shortDescription": "Codex quota in the title bar",
+    "longDescription": "A lightweight tray utility that injects read-only Codex quota into the Codex Desktop title bar.",
     "copyright": "Copyright CodexMeter contributors",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "resources": ["resources/*"]
   }
 }

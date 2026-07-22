@@ -1,213 +1,91 @@
+mod cdp;
 mod codex;
 mod models;
-mod window_top;
 
-use std::{
-    fs,
-    io::Write,
-    path::PathBuf,
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::{process::Child, sync::Mutex, time::Duration};
 
-use models::{ProviderSnapshot, WidgetPreferences};
+use models::InjectorQuotaUpdate;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WindowEvent,
+    tray::TrayIconBuilder,
+    AppHandle, Manager,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
-use tauri_plugin_window_state::{Builder as WindowStateBuilder, StateFlags};
+
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO};
+
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const ERROR_RETRY_BASE: Duration = Duration::from_secs(30);
+const ERROR_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
 
 struct AppState {
     client: reqwest::Client,
-    preferences: Mutex<WidgetPreferences>,
-    preferences_path: PathBuf,
     fetch_lock: tokio::sync::Mutex<()>,
-    snapshot_cache: Mutex<Option<(Instant, Vec<ProviderSnapshot>)>>,
+    injector_child: Mutex<Option<Child>>,
 }
 
-async fn fetch_snapshots_uncached(state: &State<'_, AppState>) -> Vec<ProviderSnapshot> {
+async fn fetch_and_publish_quota(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return false;
+    };
     let _guard = state.fetch_lock.lock().await;
-    let values = vec![codex::fetch_snapshot(&state.client).await];
-    if let Ok(mut cache) = state.snapshot_cache.lock() {
-        *cache = Some((Instant::now(), values.clone()));
-    }
-    values
-}
-
-fn load_preferences(path: &PathBuf) -> WidgetPreferences {
-    let parse = |candidate: &PathBuf| {
-        fs::read_to_string(candidate)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<WidgetPreferences>(&raw).ok())
-    };
-    if let Some(value) = parse(path) {
-        return value.normalized();
-    }
-    let backup = path.with_extension("json.bak");
-    if let Some(value) = parse(&backup) {
-        eprintln!("preferences recovered from backup");
-        return value.normalized();
-    }
-    WidgetPreferences::default()
-}
-
-fn persist_preferences(path: &PathBuf, value: &WidgetPreferences) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| "failed to create settings directory".to_string())?;
-    }
-    let serialized = serde_json::to_vec_pretty(value)
-        .map_err(|_| "failed to serialize settings".to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    let backup = path.with_extension("json.bak");
-    let mut file = fs::File::create(&temporary)
-        .map_err(|_| "failed to create temporary settings file".to_string())?;
-    file.write_all(&serialized)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| "failed to write settings".to_string())?;
-    if path.exists() {
-        let _ = fs::remove_file(&backup);
-        fs::rename(path, &backup).map_err(|_| "failed to back up settings".to_string())?;
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::rename(&backup, path);
-        return Err(format!("failed to commit settings: {error}"));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_snapshots(state: State<'_, AppState>) -> Result<Vec<ProviderSnapshot>, String> {
-    const CACHE_TTL: Duration = Duration::from_secs(30);
-    if let Ok(cache) = state.snapshot_cache.lock() {
-        if let Some((time, values)) = &*cache {
-            if time.elapsed() < CACHE_TTL {
-                return Ok(values.clone());
-            }
-        }
-    }
-    let _guard = match state.fetch_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            if let Ok(cache) = state.snapshot_cache.lock() {
-                if let Some((_, values)) = &*cache {
-                    return Ok(values.clone());
-                }
-            }
-            return Ok(vec![ProviderSnapshot::failure(
-                "unavailable",
-                "Quota refresh is already running.",
-            )]);
+    let snapshot = codex::fetch_snapshot(&state.client).await;
+    let update = InjectorQuotaUpdate::from(&snapshot);
+    let has_quota = snapshot.status == "ok" && update.percent.is_some();
+    let message = match serde_json::to_string(&update) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[quota] failed to serialize update: {error}");
+            return false;
         }
     };
-    if let Ok(cache) = state.snapshot_cache.lock() {
-        if let Some((time, values)) = &*cache {
-            if time.elapsed() < CACHE_TTL {
-                return Ok(values.clone());
-            }
+
+    let sent = state
+        .injector_child
+        .lock()
+        .map_err(|_| "injector state is unavailable".to_string())
+        .and_then(|mut child| cdp::send_injector_message(&mut child, &message));
+    if let Err(error) = sent {
+        eprintln!("[quota] failed to publish update: {error}");
+        return false;
+    }
+
+    has_quota
+}
+
+fn request_quota_refresh(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = fetch_and_publish_quota(&app).await;
+    });
+}
+
+fn start_quota_refresh_loop(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut failures = 0u32;
+        loop {
+            let succeeded = fetch_and_publish_quota(&app).await;
+            failures = if succeeded {
+                0
+            } else {
+                failures.saturating_add(1)
+            };
+            let delay = if failures == 0 {
+                REFRESH_INTERVAL
+            } else {
+                let multiplier = 1u64 << failures.saturating_sub(1).min(5);
+                ERROR_RETRY_BASE
+                    .saturating_mul(multiplier as u32)
+                    .min(ERROR_RETRY_MAX)
+            };
+            tokio::time::sleep(delay).await;
         }
-    }
-    let values = vec![codex::fetch_snapshot(&state.client).await];
-    if let Ok(mut cache) = state.snapshot_cache.lock() {
-        *cache = Some((Instant::now(), values.clone()));
-    }
-    Ok(values)
-}
-
-#[tauri::command]
-async fn refresh_snapshots(state: State<'_, AppState>) -> Result<Vec<ProviderSnapshot>, String> {
-    Ok(fetch_snapshots_uncached(&state).await)
-}
-
-#[tauri::command]
-fn get_preferences(state: State<'_, AppState>) -> Result<WidgetPreferences, String> {
-    state
-        .preferences
-        .lock()
-        .map(|value| value.clone())
-        .map_err(|_| "settings unavailable".into())
-}
-
-#[tauri::command]
-fn set_preferences(
-    preferences: WidgetPreferences,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let preferences = preferences.normalized();
-    persist_preferences(&state.preferences_path, &preferences)?;
-    *state
-        .preferences
-        .lock()
-        .map_err(|_| "settings unavailable".to_string())? = preferences;
-    Ok(())
-}
-
-#[tauri::command]
-fn set_widget_always_on_top(
-    always_on_top: bool,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<WidgetPreferences, String> {
-    apply_always_on_top(&app, &state, always_on_top)
-}
-
-fn apply_always_on_top(
-    app: &AppHandle,
-    state: &AppState,
-    always_on_top: bool,
-) -> Result<WidgetPreferences, String> {
-    let previous = state
-        .preferences
-        .lock()
-        .map_err(|_| "settings unavailable".to_string())?
-        .clone();
-    let mut next = previous.clone();
-    next.always_on_top = always_on_top;
-    persist_preferences(&state.preferences_path, &next)?;
-    let window = app
-        .get_webview_window("widget")
-        .ok_or_else(|| "widget window missing".to_string())?;
-    if let Err(error) = window_top::apply_window_top(&window, always_on_top) {
-        let _ = persist_preferences(&state.preferences_path, &previous);
-        return Err(format!("failed to toggle always-on-top: {error}"));
-    }
-    *state
-        .preferences
-        .lock()
-        .map_err(|_| "settings unavailable".to_string())? = next.clone();
-    let _ = app.emit_to("widget", "preferences-changed", next.clone());
-    Ok(next)
-}
-
-fn refresh_topmost_if_enabled(app: &AppHandle) {
-    let enabled = app
-        .try_state::<AppState>()
-        .and_then(|state| state.preferences.lock().ok().map(|prefs| prefs.always_on_top))
-        .unwrap_or(false);
-    if !enabled {
-        return;
-    }
-    if let Some(window) = app.get_webview_window("widget") {
-        let _ = window_top::apply_window_top(&window, true);
-    }
+    });
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
     let refresh = MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?;
-    let always_on_top_enabled = app
-        .try_state::<AppState>()
-        .and_then(|state| state.preferences.lock().ok().map(|prefs| prefs.always_on_top))
-        .unwrap_or(true);
-    let always_on_top = CheckMenuItem::with_id(
-        app,
-        "always_on_top",
-        "窗口置顶",
-        true,
-        always_on_top_enabled,
-        None::<&str>,
-    )?;
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(
         app,
@@ -218,7 +96,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &always_on_top, &refresh, &autostart, &quit])?;
+    let menu = Menu::with_items(app, &[&refresh, &autostart, &quit])?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .tooltip("CodexMeter");
@@ -226,39 +104,9 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
     let autostart_menu = autostart.clone();
-    let always_on_top_menu = always_on_top.clone();
     builder
         .on_menu_event(move |app, event| match event.id.as_ref() {
-            "show" => {
-                if let Some(window) = app.get_webview_window("widget") {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                    } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        refresh_topmost_if_enabled(app);
-                    }
-                }
-            }
-            "refresh" => {
-                let _ = app.emit_to("widget", "refresh-requested", ());
-            }
-            "always_on_top" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    let enabled = state
-                        .preferences
-                        .lock()
-                        .map(|prefs| prefs.always_on_top)
-                        .unwrap_or(true);
-                    let next = !enabled;
-                    match apply_always_on_top(app, &state, next) {
-                        Ok(_) => {
-                            let _ = always_on_top_menu.set_checked(next);
-                        }
-                        Err(error) => eprintln!("always-on-top update failed: {error}"),
-                    }
-                }
-            }
+            "refresh" => request_quota_refresh(app),
             "autostart" => {
                 let manager = app.autolaunch();
                 let enabled = manager.is_enabled().unwrap_or(false);
@@ -271,7 +119,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                     Ok(()) => {
                         let _ = autostart_menu.set_checked(!enabled);
                     }
-                    Err(_) => eprintln!("autostart update failed"),
+                    Err(error) => eprintln!("autostart update failed: {error}"),
                 }
             }
             "quit" => app.exit(0),
@@ -281,88 +129,142 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Initialize the verified local CDP connection and injector process.
+fn init_cdp(app: &AppHandle) -> bool {
+    let port = cdp::DEFAULT_CDP_PORT;
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("[cdp] failed to create HTTP client: {error}");
+            return false;
+        }
+    };
+
+    let browser_id = match tauri::async_runtime::block_on(cdp::get_browser_id(&client, port)) {
+        Ok(id) => id,
+        Err(_) => {
+            #[cfg(windows)]
+            {
+                let text: Vec<u16> = "Codex 未启用调试端口，是否重启 Codex 以启用额度显示？"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let caption: Vec<u16> = "CodexMeter"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let result = unsafe {
+                    MessageBoxW(
+                        None,
+                        windows::core::PCWSTR(text.as_ptr()),
+                        windows::core::PCWSTR(caption.as_ptr()),
+                        MB_YESNO | MB_ICONQUESTION,
+                    )
+                };
+                if result != IDYES {
+                    app.exit(0);
+                    return false;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                eprintln!("[cdp] automatic Codex restart is only supported on Windows");
+                app.exit(0);
+                return false;
+            }
+
+            if let Err(error) = cdp::stop_codex() {
+                eprintln!("[cdp] failed to stop Codex: {error}");
+            }
+            if let Err(error) = cdp::launch_codex_with_cdp(port) {
+                eprintln!("[cdp] {error}");
+                app.exit(0);
+                return false;
+            }
+            match tauri::async_runtime::block_on(cdp::wait_for_cdp(&client, port, 30)) {
+                Ok(id) => id,
+                Err(error) => {
+                    eprintln!("[cdp] {error}");
+                    app.exit(0);
+                    return false;
+                }
+            }
+        }
+    };
+
+    let node_exe = match cdp::find_node_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("[cdp] {error}");
+            return false;
+        }
+    };
+    let injector_mjs = match cdp::resolve_injector_mjs() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("[cdp] {error}");
+            return false;
+        }
+    };
+
+    match cdp::spawn_injector(&node_exe, &injector_mjs, port, &browser_id) {
+        Ok(child) => {
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut injector) = state.injector_child.lock() {
+                    *injector = Some(child);
+                }
+            }
+            eprintln!("[cdp] injector started (port={port}, browser-id={browser_id})");
+            true
+        }
+        Err(error) => {
+            eprintln!("[cdp] {error}");
+            false
+        }
+    }
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("widget") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            request_quota_refresh(app);
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(
-            WindowStateBuilder::default()
-                // Keep window position across sessions, but always use the configured 350x40 size.
-                .with_state_flags(StateFlags::POSITION)
-                .build(),
-        )
         .setup(|app| {
-            let data_dir = app.path().app_config_dir()?;
-            let preferences_path = data_dir.join("preferences.json");
-            let preferences = load_preferences(&preferences_path);
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(12))
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent("QuotaFloat/0.1")
+                .user_agent("CodexMeter/0.2")
                 .build()
                 .expect("static HTTP client configuration must be valid");
             app.manage(AppState {
                 client,
-                preferences: Mutex::new(preferences.clone()),
-                preferences_path,
                 fetch_lock: tokio::sync::Mutex::new(()),
-                snapshot_cache: Mutex::new(None),
+                injector_child: Mutex::new(None),
             });
-            if setup_tray(app).is_err() {
-                eprintln!("tray setup failed; enabling taskbar fallback");
-                if let Some(window) = app.get_webview_window("widget") {
-                    let _ = window.set_skip_taskbar(false);
-                }
-            }
-            if let Some(window) = app.get_webview_window("widget") {
-                let size = tauri::LogicalSize::new(350.0, 40.0);
-                let _ = window.set_size(size);
-                let _ = window.set_min_size(Some(size));
-                let _ = window.set_max_size(Some(size));
-                let _ = window_top::apply_window_top(&window, preferences.always_on_top);
+            setup_tray(app)?;
+            if init_cdp(app.handle()) {
+                start_quota_refresh_loop(app.handle().clone());
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_snapshots,
-            refresh_snapshots,
-            get_preferences,
-            set_preferences,
-            set_widget_always_on_top
-        ])
-        .on_tray_icon_event(|app, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                if let Some(window) = app.get_webview_window("widget") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    refresh_topmost_if_enabled(app);
-                }
-            }
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
-            }
-        })
         .build(tauri::generate_context!())
         .expect("failed to build CodexMeter");
+
     app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::Resumed) {
-            let _ = app_handle.emit_to("widget", "refresh-requested", ());
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                if let Ok(mut child) = state.injector_child.lock() {
+                    cdp::kill_injector(&mut child);
+                }
+            }
         }
     });
 }

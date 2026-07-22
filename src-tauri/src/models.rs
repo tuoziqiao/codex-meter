@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,31 +40,71 @@ impl ProviderSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WidgetPreferences {
-    #[serde(default = "default_always_on_top")]
-    pub always_on_top: bool,
-    pub auto_rotate_seconds: u64,
-    #[serde(default = "default_language")]
-    pub language: String,
+pub struct InjectorQuotaUpdate {
+    #[serde(rename = "type")]
+    pub message_type: &'static str,
+    pub status: String,
+    pub percent: Option<u8>,
+    pub resets_at: Option<String>,
 }
 
-fn default_always_on_top() -> bool { true }
-fn default_language() -> String { "zh-CN".into() }
-
-impl Default for WidgetPreferences {
-    fn default() -> Self {
-        Self { always_on_top: true, auto_rotate_seconds: 12, language: default_language() }
+impl From<&ProviderSnapshot> for InjectorQuotaUpdate {
+    fn from(snapshot: &ProviderSnapshot) -> Self {
+        let window = snapshot
+            .weekly_window
+            .as_ref()
+            .or(snapshot.short_window.as_ref());
+        Self {
+            message_type: "quota",
+            status: snapshot.status.clone(),
+            percent: window.map(|value| value.remaining_percent.clamp(0.0, 100.0).round() as u8),
+            resets_at: window.and_then(|value| value.resets_at.clone()),
+        }
     }
 }
 
-impl WidgetPreferences {
-    pub fn normalized(mut self) -> Self {
-        self.auto_rotate_seconds = self.auto_rotate_seconds.clamp(5, 300);
-        if self.language != "zh-CN" {
-            self.language = default_language();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(percent: f64, resets_at: &str, seconds: u64) -> UsageWindow {
+        UsageWindow {
+            remaining_percent: percent,
+            resets_at: Some(resets_at.into()),
+            window_seconds: seconds,
         }
-        self
+    }
+
+    #[test]
+    fn injector_update_prefers_weekly_quota() {
+        let snapshot = ProviderSnapshot {
+            provider: "codex".into(),
+            display_name: "CODEX".into(),
+            plan: Some("PRO".into()),
+            short_window: Some(window(91.0, "2026-08-20T00:00:00Z", 18_000)),
+            weekly_window: Some(window(76.4, "2026-08-25T00:00:00Z", 604_800)),
+            reset_credits: None,
+            reset_credit_expires_at: Vec::new(),
+            updated_at: "2026-08-18T00:00:00Z".into(),
+            status: "ok".into(),
+            message: None,
+        };
+
+        let update = InjectorQuotaUpdate::from(&snapshot);
+        assert_eq!(update.percent, Some(76));
+        assert_eq!(update.resets_at.as_deref(), Some("2026-08-25T00:00:00Z"));
+    }
+
+    #[test]
+    fn injector_update_falls_back_to_short_window() {
+        let mut snapshot = ProviderSnapshot::failure("unavailable", "missing");
+        snapshot.status = "ok".into();
+        snapshot.short_window = Some(window(42.6, "2026-08-20T00:00:00Z", 18_000));
+
+        let update = InjectorQuotaUpdate::from(&snapshot);
+        assert_eq!(update.percent, Some(43));
+        assert_eq!(update.resets_at.as_deref(), Some("2026-08-20T00:00:00Z"));
     }
 }
