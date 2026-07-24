@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -11,6 +12,26 @@ use serde_json::Value;
 pub const DEFAULT_CDP_PORT: u16 = 9335;
 pub const CDP_WAIT_TIMEOUT_SECS: u64 = 45;
 const STATE_SCHEMA_VERSION: u32 = 1;
+
+/// CREATE_NO_WINDOW — prevent console flashes for helper processes in release builds.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn hidden_command(program: impl AsRef<OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+fn hidden_powershell() -> Command {
+    let mut cmd = hidden_command("powershell.exe");
+    // Belt-and-suspenders with CREATE_NO_WINDOW for hosts that still allocate a console.
+    cmd.arg("-WindowStyle").arg("Hidden");
+    cmd
+}
 
 /// Result of ensuring a verified Codex CDP endpoint.
 #[derive(Debug, Clone)]
@@ -223,7 +244,9 @@ pub fn find_codex_exe() -> Result<PathBuf, String> {
 #[allow(dead_code)]
 pub fn stop_codex() -> Result<(), String> {
     for image in ["ChatGPT.exe", "ChatGPT (Beta).exe"] {
-        let _ = Command::new("taskkill").args(["/IM", image, "/F"]).output();
+        let _ = hidden_command("taskkill.exe")
+            .args(["/IM", image, "/F"])
+            .output();
     }
     std::thread::sleep(Duration::from_secs(2));
     Ok(())
@@ -236,7 +259,7 @@ pub fn resolve_codex_install() -> Result<CodexInstall, String> {
         .to_str()
         .ok_or_else(|| "resolve-codex-install.ps1 路径无效".to_string())?;
 
-    let output = Command::new("powershell")
+    let output = hidden_powershell()
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -423,7 +446,7 @@ fn run_launch_codex_cdp(
         install.version, install.app_user_model_id, install.executable
     );
 
-    let output = Command::new("powershell")
+    let output = hidden_powershell()
         .args(&args)
         .output()
         .map_err(|e| format!("PowerShell 调用失败: {e}"))?;
@@ -511,7 +534,7 @@ pub fn launch_codex_with_cdp(port: u16) -> Result<(), String> {
 
 /// Find the Node.js executable on PATH.
 pub fn find_node_exe() -> Result<PathBuf, String> {
-    if let Ok(output) = Command::new("where").args(["node"]).output() {
+    if let Ok(output) = hidden_command("where.exe").args(["node"]).output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout)
                 .lines()
@@ -551,7 +574,7 @@ pub fn spawn_injector(
     browser_id: &str,
 ) -> Result<Child, String> {
     #[cfg(windows)]
-    const HIDDEN: u32 = 0x08000000; // CREATE_NO_WINDOW
+    const HIDDEN: u32 = CREATE_NO_WINDOW;
 
     let mut cmd = Command::new(node_exe);
     cmd.args([
