@@ -1,6 +1,6 @@
 (() => {
   const HOST_ID = "codex-meter-widget";
-  const VERSION = "0.2.0";
+  const VERSION = "0.3.0";
 
   const previous = window.__CODEX_METER_STATE__;
   if (typeof previous?.dispose === "function") {
