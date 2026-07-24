@@ -102,6 +102,7 @@ foreach ($package in $packages) {
     executable = $result.executable
     version = $result.version
     packageName = $result.packageName
+    packageFamilyName = $result.packageFamilyName
   }
   Write-Output ($payload | ConvertTo-Json -Compress)
   exit 0

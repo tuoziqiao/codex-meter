@@ -51,10 +51,13 @@ npm run package:windows
 
 - `src-tauri/src/codex.rs`：读取登录状态并查询真实额度。
 - `src-tauri/src/models.rs`：将接口数据映射为注入器消息。
-- `src-tauri/src/cdp.rs`：启动并控制 CDP 注入器。
+- `src-tauri/src/cdp.rs`：`ensure_codex_cdp`、状态持久化、注入器进程管理。
+- `src-tauri/resources/resolve-codex-install.ps1`：解析 Store 包身份（稳定版 / Beta）。
+- `src-tauri/resources/launch-codex-cdp.ps1`：COM 启动、owl 回退、端口扫描（9335–9435）、CDP 校验。
 - `src-tauri/resources/injector.mjs`：连接 Codex Desktop 并分发额度数据。
 - `src-tauri/resources/inject.js`：标题栏电量组件及样式。
 - `src/inject.test.ts`：注入位置、真实数据渲染和清理测试。
+- `scripts/test-cdp-launch.ps1`：CDP 启动辅助自检（命令行状态 / 端口冲突）。
 
 ## 隐私说明
 

@@ -113,7 +113,7 @@
       text-shadow: none;
     }
 
-    /* --- Date --- */
+    /* --- Date (hidden until hover) --- */
     .date {
       font-family: var(--titlebar-font-family, inherit);
       font-size: var(--titlebar-font-size, 14px);
@@ -122,6 +122,10 @@
       line-height: var(--titlebar-line-height, 14px);
       color: var(--titlebar-text-color, currentColor);
       white-space: nowrap;
+      display: none;
+    }
+    .widget:hover .date {
+      display: inline;
     }
 
     /* --- Theme: dark (default) --- */

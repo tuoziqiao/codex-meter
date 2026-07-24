@@ -46,6 +46,9 @@ describe("title-bar quota injection", () => {
     expect(fill?.style.width).toBe("49%");
     expect(text?.textContent).toBe("49");
     expect(date?.textContent).toBe("8月20日");
+    expect(date?.hidden).toBe(false);
+    expect(styleText).toMatch(/\.date\s*\{[^}]*display:\s*none/);
+    expect(styleText).toMatch(/\.widget:hover \.date\s*\{[^}]*display:\s*inline/);
 
     state.setQuota({
       status: "ok",

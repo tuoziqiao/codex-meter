@@ -131,22 +131,12 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// Initialize the verified local CDP connection and injector process.
 fn init_cdp(app: &AppHandle) -> bool {
-    let port = cdp::DEFAULT_CDP_PORT;
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            eprintln!("[cdp] failed to create HTTP client: {error}");
-            return false;
-        }
-    };
+    let preferred_port = cdp::DEFAULT_CDP_PORT;
 
-    let browser_id = match tauri::async_runtime::block_on(cdp::get_browser_id(&client, port)) {
-        Ok(id) => id,
-        Err(_) => {
+    let session = match cdp::ensure_codex_cdp(preferred_port, false) {
+        Ok(session) => session,
+        Err(probe_error) => {
+            eprintln!("[cdp] no reusable CDP: {probe_error}");
             #[cfg(windows)]
             {
                 let text: Vec<u16> = "Codex 未启用调试端口，是否重启 Codex 以启用额度显示？"
@@ -177,16 +167,8 @@ fn init_cdp(app: &AppHandle) -> bool {
                 return false;
             }
 
-            if let Err(error) = cdp::stop_codex() {
-                eprintln!("[cdp] failed to stop Codex: {error}");
-            }
-            if let Err(error) = cdp::launch_codex_with_cdp(port) {
-                eprintln!("[cdp] {error}");
-                app.exit(0);
-                return false;
-            }
-            match tauri::async_runtime::block_on(cdp::wait_for_cdp(&client, port, 30)) {
-                Ok(id) => id,
+            match cdp::ensure_codex_cdp(preferred_port, true) {
+                Ok(session) => session,
                 Err(error) => {
                     eprintln!("[cdp] {error}");
                     app.exit(0);
@@ -211,14 +193,22 @@ fn init_cdp(app: &AppHandle) -> bool {
         }
     };
 
-    match cdp::spawn_injector(&node_exe, &injector_mjs, port, &browser_id) {
+    match cdp::spawn_injector(
+        &node_exe,
+        &injector_mjs,
+        session.port,
+        &session.browser_id,
+    ) {
         Ok(child) => {
             if let Some(state) = app.try_state::<AppState>() {
                 if let Ok(mut injector) = state.injector_child.lock() {
                     *injector = Some(child);
                 }
             }
-            eprintln!("[cdp] injector started (port={port}, browser-id={browser_id})");
+            eprintln!(
+                "[cdp] injector started (port={}, browser-id={}, strategy={})",
+                session.port, session.browser_id, session.strategy
+            );
             true
         }
         Err(error) => {
