@@ -24,14 +24,14 @@ npm run tauri -- dev
 # 生成可直接运行的 exe
 npm run package:exe
 
-# 生成 MSI 与 NSIS 安装包
+# 生成 MSI 与 NSIS（精简版 + 内置 Node 版）
 npm run package:windows
 ```
 
 产物位置：
 
 - `src-tauri\target\release\codex-meter.exe`
-- `src-tauri\target\release\bundle\msi\`
-- `src-tauri\target\release\bundle\nsis\`
+- `src-tauri\target\release\bundle\msi\`、`nsis\`（精简版，需系统 Node）
+- `src-tauri\target\release\bundle\with-node\msi\`、`with-node\nsis\`（内置 Node）
 
 如果命令提示未找到 Build Tools，请在 Visual Studio Installer 中安装上述 C++ 工作负载后重新执行。

@@ -13,14 +13,23 @@ cargo check --manifest-path src-tauri\Cargo.toml
 ## 生成本地 Windows 产物
 
 ```powershell
-# 裸 exe
+# 裸 exe（不含内置 Node）
 npm run package:exe
 
-# MSI 和 NSIS 安装包
+# MSI 和 NSIS：精简版 + 内置 Node 版
 npm run package:windows
 ```
 
-`package:exe` 输出 `src-tauri\target\release\codex-meter.exe`；`package:windows` 输出到 `src-tauri\target\release\bundle\msi\` 和 `src-tauri\target\release\bundle\nsis\`。
+`package:exe` 输出 `src-tauri\target\release\codex-meter.exe`。
+
+`package:windows` 一次打出两套：
+
+| 变体 | 路径 | 说明 |
+| --- | --- | --- |
+| 精简版 | `src-tauri\target\release\bundle\msi\`、`nsis\` | 依赖本机 Node.js |
+| 内置 Node 版 | `src-tauri\target\release\bundle\with-node\msi\`、`with-node\nsis\` | 捆绑 `node.exe`（约 +87MB），文件名带 `-with-node` |
+
+打包脚本会下载并校验固定 LTS 的 `win-x64/node.exe`（缓存于 `src-tauri\.node-runtime-cache\`）。
 
 两个命令会自动初始化 MSVC x64 环境。若提示缺少 Visual Studio Build Tools，请安装 **Desktop development with C++** 工作负载后重试。
 

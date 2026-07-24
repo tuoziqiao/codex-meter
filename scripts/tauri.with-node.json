@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "resources": [
+      "resources/inject.js",
+      "resources/injector.mjs",
+      "resources/launch-codex-cdp.ps1",
+      "resources/resolve-codex-install.ps1",
+      "resources/runtime/node.exe"
+    ]
+  }
+}

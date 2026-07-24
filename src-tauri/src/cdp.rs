@@ -532,8 +532,14 @@ pub fn launch_codex_with_cdp(port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Find the Node.js executable on PATH.
+/// Find the Node.js executable: prefer a bundled runtime, then system installs.
 pub fn find_node_exe() -> Result<PathBuf, String> {
+    if let Ok(bundled) = resource_path("runtime/node.exe") {
+        if bundled.exists() {
+            return Ok(bundled);
+        }
+    }
+
     if let Ok(output) = hidden_command("where.exe").args(["node"]).output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout)
@@ -558,7 +564,10 @@ pub fn find_node_exe() -> Result<PathBuf, String> {
         }
     }
 
-    Err("Node.js 未找到，请安装 Node.js 并确保其在 PATH 中。".into())
+    Err(
+        "Node.js 未找到。请安装 Node.js 并确保其在 PATH 中，或使用带内置 Node 的安装包。"
+            .into(),
+    )
 }
 
 /// Resolve the path to the injector.mjs resource file.

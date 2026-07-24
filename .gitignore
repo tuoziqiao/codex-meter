@@ -1,6 +1,8 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/.node-runtime-cache/
+src-tauri/resources/runtime/node.exe
 *.log
 .env
 .env.*

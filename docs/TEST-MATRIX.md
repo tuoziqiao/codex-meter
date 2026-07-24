@@ -11,6 +11,6 @@
 | 前端构建 | `npm run build` | TypeScript 与 Vite 构建通过。 |
 | Rust 检查 | `cargo check --manifest-path src-tauri\Cargo.toml` | Rust 静态检查通过。 |
 | exe 打包 | `npm run package:exe` | 生成 `src-tauri\target\release\codex-meter.exe`。 |
-| 安装包打包 | `npm run package:windows` | 生成 MSI 和 NSIS 安装包。 |
+| 安装包打包 | `npm run package:windows` | 生成精简版 MSI/NSIS，以及 `bundle\with-node\` 下的内置 Node 安装包。 |
 
 Windows 打包前必须具备 Rust MSVC 工具链及 Visual Studio Build Tools 的 **Desktop development with C++** 工作负载。
