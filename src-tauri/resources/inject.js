@@ -104,6 +104,10 @@
       color: rgba(0, 0, 0, 0.82);
       text-shadow: none;
     }
+    .battery[data-level="critical"] .battery-text {
+      color: #666;
+      text-shadow: none;
+    }
     .battery[data-level="unknown"] .battery-text {
       color: var(--titlebar-text-color, currentColor);
       text-shadow: none;

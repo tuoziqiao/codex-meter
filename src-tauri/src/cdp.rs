@@ -64,71 +64,159 @@ pub async fn wait_for_cdp(
     ))
 }
 
-/// Find the Codex Desktop executable (ChatGPT.exe inside the Appx package).
-/// Uses Get-AppxPackage to locate the installation directory.
+/// Find the Codex Desktop executable inside the validated Store package.
 #[allow(dead_code)]
 pub fn find_codex_exe() -> Result<PathBuf, String> {
-    // Try AppxPackage via PowerShell — Codex is a Store app (OpenAI.Codex)
-    if let Ok(output) = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "(Get-AppxPackage -Name 'OpenAI.Codex' | Sort-Object Version -Descending | Select-Object -First 1).InstallLocation",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let location = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !location.is_empty() {
-                // Store app executable lives at {InstallLocation}\app\ChatGPT.exe
-                let candidate = PathBuf::from(&location).join(r"app\ChatGPT.exe");
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
+    let install = resolve_codex_install()?;
+    let candidate = PathBuf::from(&install.executable);
+    if candidate.exists() {
+        return Ok(candidate);
     }
-
     Err("Codex Desktop 未找到，请先安装 Codex Desktop。".into())
 }
 
-/// Stop all running ChatGPT (Codex) processes.
+/// Stop all running ChatGPT / ChatGPT (Beta) (Codex) processes.
 pub fn stop_codex() -> Result<(), String> {
-    let _ = Command::new("taskkill")
-        .args(["/IM", "ChatGPT.exe", "/F"])
-        .output();
+    for image in ["ChatGPT.exe", "ChatGPT (Beta).exe"] {
+        let _ = Command::new("taskkill").args(["/IM", image, "/F"]).output();
+    }
     // Give processes time to exit
     std::thread::sleep(Duration::from_secs(2));
     Ok(())
 }
 
-/// Get the AppUserModelId for the Codex Store package.
-/// Returns e.g. "OpenAI.Codex_0.1.2.0_x64__abc123!App"
-pub fn get_codex_app_user_model_id() -> Result<String, String> {
+/// Validated OpenAI.Codex Store package identity used for package activation.
+#[derive(Debug, Clone)]
+pub struct CodexInstall {
+    pub app_user_model_id: String,
+    pub package_root: String,
+    pub executable: String,
+    pub version: String,
+}
+
+/// Resolve the path to resolve-codex-install.ps1 (dev CWD, then exe-relative).
+fn resolve_codex_install_ps1() -> Result<PathBuf, String> {
+    if let Ok(cwd) = std::env::current_dir() {
+        // Project root during `npm run tauri -- dev`
+        let from_root = cwd
+            .join("src-tauri")
+            .join("resources")
+            .join("resolve-codex-install.ps1");
+        if from_root.exists() {
+            return Ok(from_root);
+        }
+        // `cargo test` / cargo commands run with CWD = src-tauri
+        let from_crate = cwd.join("resources").join("resolve-codex-install.ps1");
+        if from_crate.exists() {
+            return Ok(from_crate);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("resources").join("resolve-codex-install.ps1");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err("resolve-codex-install.ps1 资源文件未找到。".into())
+}
+
+fn powershell_error_message(stderr: &[u8], fallback: &str) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let trimmed = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(fallback);
+    // PowerShell Write-Error often prefixes with category info; keep the useful tail.
+    if let Some(idx) = trimmed.rfind(": ") {
+        let tail = trimmed[idx + 2..].trim();
+        if !tail.is_empty() {
+            return tail.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Resolve the official Store Codex install via Appx manifest (Dream-Skin compatible).
+pub fn resolve_codex_install() -> Result<CodexInstall, String> {
+    let script = resolve_codex_install_ps1()?;
+    let script_path = script
+        .to_str()
+        .ok_or_else(|| "resolve-codex-install.ps1 路径无效".to_string())?;
+
     let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            r"$p = Get-AppxPackage -Name 'OpenAI.Codex' | Sort-Object Version -Descending | Select-Object -First 1; if ($p) { $m = Get-AppxPackageManifest -Package $p; $appId = ($m.Package.Applications.Application | Where-Object { $_.Executable -replace '/','\' -eq 'app\ChatGPT.exe' } | Select-Object -First 1).Id; if ($appId) { Write-Output ('{0}!{1}' -f $p.PackageFamilyName, $appId) } }",
-        ])
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path])
         .output()
         .map_err(|e| format!("PowerShell 调用失败: {e}"))?;
+
     if !output.status.success() {
-        return Err("无法获取 Codex AppUserModelId".into());
+        let detail = powershell_error_message(&output.stderr, "无法解析 Codex 安装身份");
+        return Err(format!("无法解析 Codex 安装身份: {detail}"));
     }
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if id.is_empty() {
-        return Err("未找到 Codex 的 ApplicationId".into());
-    }
-    Ok(id)
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('{'))
+        .ok_or_else(|| "无法解析 Codex 安装身份: 解析脚本未返回 JSON".to_string())?;
+
+    let value: Value = serde_json::from_str(json_line)
+        .map_err(|e| format!("无法解析 Codex 安装身份: JSON 无效 ({e})"))?;
+
+    let app_user_model_id = value
+        .get("appUserModelId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "无法解析 Codex 安装身份: 缺少 appUserModelId".to_string())?
+        .to_owned();
+    let package_root = value
+        .get("packageRoot")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let executable = value
+        .get("executable")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let version = value
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+
+    Ok(CodexInstall {
+        app_user_model_id,
+        package_root,
+        executable,
+        version,
+    })
+}
+
+/// Get the AppUserModelId for the Codex Store package.
+/// Returns e.g. "OpenAI.Codex_xxx!App"
+#[allow(dead_code)]
+pub fn get_codex_app_user_model_id() -> Result<String, String> {
+    Ok(resolve_codex_install()?.app_user_model_id)
 }
 
 /// Launch Codex with CDP debugging port enabled.
 /// Uses COM IApplicationActivationManager to activate the Store app with arguments,
 /// matching the approach used by Codex-Dream-Skin.
 pub fn launch_codex_with_cdp(port: u16) -> Result<(), String> {
-    let app_id = get_codex_app_user_model_id()?;
+    let install = resolve_codex_install()?;
+    let app_id = &install.app_user_model_id;
     let args = format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}");
+    eprintln!(
+        "[cdp] launching Codex {} ({}) from {} via {}",
+        install.version,
+        install.app_user_model_id,
+        install.package_root,
+        install.executable
+    );
 
     // Use PowerShell + Add-Type to call COM IApplicationActivationManager
     // (same approach as Codex-Dream-Skin's Initialize-DreamSkinPackageLauncher)
@@ -289,5 +377,26 @@ pub fn kill_injector(child: &mut Option<Child>) {
 
         let _ = process.kill();
         let _ = process.wait();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_installed_codex_store_identity() {
+        let install = resolve_codex_install().expect("Codex Store package should be resolvable");
+        assert!(
+            install.app_user_model_id.contains('!'),
+            "appUserModelId should be family!applicationId, got {}",
+            install.app_user_model_id
+        );
+        assert!(
+            PathBuf::from(&install.executable).exists(),
+            "executable should exist: {}",
+            install.executable
+        );
+        assert!(!install.version.is_empty());
     }
 }

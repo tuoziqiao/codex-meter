@@ -39,12 +39,24 @@ describe("title-bar quota injection", () => {
     const fill = host?.shadowRoot?.querySelector<HTMLElement>(".battery-fill");
     const text = host?.shadowRoot?.querySelector<HTMLElement>(".battery-text");
     const date = host?.shadowRoot?.querySelector<HTMLElement>(".date");
+    const styleText = host?.shadowRoot?.querySelector("style")?.textContent ?? "";
 
     expect(host?.previousElementSibling?.getAttribute("aria-label")).toBe("帮助");
     expect(battery?.dataset.level).toBe("warning");
     expect(fill?.style.width).toBe("49%");
     expect(text?.textContent).toBe("49");
     expect(date?.textContent).toBe("8月20日");
+
+    state.setQuota({
+      status: "ok",
+      percent: 19,
+      resetsAt: "2026-08-20T00:00:00",
+    });
+    expect(battery?.dataset.level).toBe("critical");
+    expect(fill?.style.width).toBe("19%");
+    expect(text?.textContent).toBe("19");
+    expect(styleText).toContain('.battery[data-level="critical"] .battery-text');
+    expect(styleText).toMatch(/\.battery\[data-level="critical"\] \.battery-text\s*\{[^}]*color:\s*#666/);
 
     state.setQuota({ status: "unavailable", percent: null, resetsAt: null });
     expect(text?.textContent).toBe("--");
